@@ -1,66 +1,114 @@
-include("math.jl")
-# Function definitions
+nclude("math.jl")
+include("neural_structure.jl")
 using LinearAlgebra
 using MLDatasets: MNIST
 using Random
 using Statistics
+using Serialization
+using Shuffle
 
-dataset_train = MNIST(:train)
-dataset_test = MNIST(:test)
+function compute_layer(W::Matrix, a::Vector, b::Vector)
+    Y = zeros(Float32, length(b))
+    mul!(Y, W, a)
+    Y = Y + b
+    return Y
+end
 
-mutable struct Layer
-    """Layer struct with named spaces
-    neurons : Vector of real numbers
-    weights : Matrix of real numbers
-    biases : Vector of real numbers
-    type : Type of the layer (input, hidden or output)."""
+function fprop(x::Vector, N::𝓝, fₕ=σ, fₒ=σ)
+    N.net[1].neurons = x
+    L = N.nlayers
+    for i in 1:(L-2)
+        W = N.net[i+1].W
+        a = N.net[i].neurons
+        b = N.net[i+1].biases
+        z = compute_layer(W, a, b)
+        N.net[i+1].neurons = fₕ(z)
+    end
+    # Output layer with special function
+    W = N.net[L].W
+    a = N.net[L-1].neurons
+    b = N.net[L].biases
+    z = compute_layer(W, a, b)
+    N.net[L].neurons = fₒ(z)
+    return(N)
+end
 
-    neurons::Vector
-    weights::Matrix
-    biases::Vector
-    type::String
-    function Layer(neurons::Vector, weights::Matrix, biases::Vector, type::String)
-        new(neurons, weights, biases, type)
+function backprop(N::𝓝, y⃗::Vector)
+    ∇𝓝 = 𝓝(N.dims)
+    ∂C∂aᴸ = 2 * (N.net[N.nlayers].neurons - y⃗)
+    for l in reverse(2:N.nlayers)
+        ∂σ∂z = dσdx(logit.(N.net[l].neurons))
+        P = hadamard(∂C∂aᴸ, ∂σ∂z)
+        ∇W = kron(P, transpose(N.net[l-1].neurons))
+        ∇𝓝.net[l].W = ∇W
+        ∇𝓝.net[l].biases = P
+        # Change the dimension of the vector appropriately
+        ∂C∂aᴸ = zeros(Float32, size(N.net[l].W, 2))
+        mul!(∂C∂aᴸ, transpose(N.net[l].W), P)
+    end
+    return ∇𝓝
+end
+
+function trainset_gradient(input_data::MNIST, network::𝓝,
+    hidden_activation::Function=σ,
+    output_activation::Function=σ)
+    """
+    Computes the average gradient for the whole training set
+    for a given network.
+    """
+    costs = 0
+    ∇N = 𝓝(network.dims)
+    # Substract network parameters by themselves, so that all parameters are zero.
+    minus∇N = ⊗(-1, ∇N)
+    ∇N = ⊕(∇N, minus∇N)
+    nsamples = length(input_data.targets)
+    @time for i in 1:nsamples
+        input = vec(input_data[i].features)
+        network = fprop(input, network,
+                                hidden_activation, output_activation)
+        # Adds all weights and biases of ▿net and the gradient of the cost
+        # in the network so as to compute the average at the end.s
+        costs += cost(network.net[network.nlayers].neurons, input_data[i].targets)
+        y = get_target_vector(input_data[i].targets)
+        gradient = backprop(network, y)
+        ∇N = ⊕(∇N, gradient)
+    end
+    # Average gradient over all training set:
+    return (⊗(1 / nsamples, ∇N), costs/nsamples)
+end
+
+function train(input_data::MNIST, network::𝓝, convergence_criteria::Number, η)
+    if η <= 0
+        error("Cannot train with non-positive learning rate")
+    end
+    cost = 1000
+    costs = []
+    epoch = 1
+    while cost > convergence_criteria
+        print("Starting epoch ", string(epoch), ". Cost: ", cost)
+        avg_gradient = trainset_gradient(input_data, network) 
+        network = ⊕(network, ⊗(-η, avg_gradient[1]))
+        cost = avg_gradient[2]
+        append!(costs, cost)
+        epoch += 1
+
+    end
+    return (network, costs)
+end
+
+function save_network(network::𝓝, filename="net"::String)
+    open(filename * ".bin", "w") do f
+        serialize(f, network)
     end
 end
 
-mutable struct Network
-    """Network struct with namedspaces
-    net : A dictionary with int/Layer pairs
-    dims : Dimensino of the network
-    nlayers : Number of layers in the network
-    nparams : Total number of parameters (weights and biases)"""
-    net::Dict{Int,Layer}
-    dims::Vector
-    nlayers::Int
-    nparams::Int
-    function Network(dims::Vector)
-        structure = Dict()
-        structure[length(dims)] = Layer(zeros(Float32, last(dims)), Array{Float32}(undef, 0, 0), [], "Output")
-        for i in 1:(length(dims)-1)
-            type = ifelse(i > 1, "Hidden", "Input")
-            neurons = zeros(Float32, dims[i])
-            weights = rand(Float32, dims[i+1], dims[i])
-            biases = rand(Float32, dims[i+1])
-            structure[i] = Layer(neurons, weights, biases, type)
-        end
-        nparams::Int32 = 0
-        for i in 1:(length(dims)-1)
-            nparams += dims[i] * dims[i+1] + dims[i+1]
-        end
-        new(structure, dims, length(dims), nparams)
-    end
+function load_network(filename)
+    net = deserialize(filename)
+    return net
 end
 
-function compute_layer(layer::Layer, f::Function=relu)
-    Y = zeros(Float32, length(layer.biases))
-    Y = mul!(Y, layer.weights, layer.neurons) + layer.biases
-    f(Y)
-end
-
-# Prototype. Seems to work? (See test in test sections)
-function get_mini_batches(data::MNIST, size::Int, n::Int)
-    shuffled = Shuffle.shuffle(data)
+function get_mini_batches(data::Vector, size::Int, n::Int)
+    shuffled = shuffle(data)
     batches = [shuffled[1:size]]
     for i in 2:n
         append!(batches, [shuffled[(i*size+1):(i+1)*size]])
@@ -68,73 +116,8 @@ function get_mini_batches(data::MNIST, size::Int, n::Int)
     return batches
 end
 
-function get_target_vector(target::Int)
+function get_target_vector(target::Int)::Vector
     target_vector = zeros(Float32, 10)
     target_vector[target+1] = 1
-end
-
-
-function f_propagation(image::Matrix, network::Network,
-    hidden_activation::Function=relu,
-    output_activation::Function=softmax)
-    """Perform forward propagation by defining input layer as
-    determined by input x and propagating through predefined
-    empty network."""
-    network.net[1].neurons = vec(image)
-    for i in 2:network.nlayers
-        # Compute ith layer based on (i-1)nth layer's parameters and values.
-        network.net[i].neurons = compute_layer(network.net[i-1], hidden_activation)
-    end
-    network.net[network.nlayers].neurons = output_activation(network.net[network.nlayers].neurons)
-    return network
-end
-
-function train(input_data::MNIST, network::Network,
-    hidden_activation::Function=relu,
-    output_activation::Function=softmax,
-    Δ::Number=0, Δᵢ::Tuple=(1, 1, 1))
-    """Trains the network net given certain input data with the possibility of 
-    using a delta displacement. By default, delta = 0 and no displacement is applied.
-    input_data : MNIST dataset.
-    net : A network as defined by init_network.
-    Δ : Displacement value for specific parameter given by Δᵢ.
-    Δᵢ (Layer, component (weight or bias), row index for element index) Layer from 1 to n-1, component is 2 o 3
-    (weight and bias resepctevely), element index """
-    costs = zeros(Float32, 60000)
-    @time for i in 1:length(input_data.targets)
-        network = f_propagation(input_data[i].features, network,
-            hidden_activation, output_activation,
-            Δ, Δᵢ)
-
-        costs[i] = cost(network.net[network.nlayers].neurons, input_data[i].targets)
-    end
-    return mean(costs)
-end
-
-
-function update_parameters(network::Network, gradient::Vector, η::Float32)
-    for i in 1:(network.nparams)
-        network = shift_parameter(network, i, -gradient[i] * η)
-    end
-    return network
-end
-
-function backprop(network::Network, target)
-    """
-    Computes gradient of the loss function with respect to the weights
-    and biases in a given network for a single sample.
-    """
-
-    ▿aᴸ = 2 * (network.net[network.nlayers].neurons - get_target_vector(target))  # Derivative of cost function with respect to activations in last layer
-    ▿net = Network(network.dims)
-    ▿net.net[network.nlayers].neurons = ▿aᴸ
-
-    for l in reverse(1:(network.nlayers-1))
-        dσ_dz = ddx_σ(logit(network.net[l+1].neurons)) # Derivative of the sigmoid function evaluated in z.  
-        p = hadamard(▿net.net[l+1].neurons, dσ_dz)
-        ▿net.net[l].biases = p
-        ▿net.net[l].weights = outerproduct(dσ_dz, network.net[l].neurons)
-        ▿net.net[l].neurons = mul!(▿net.net[l].neurons, tranpose(network.net[l].weights), p)
-    end
-    return ▿net
+    return target_vector
 end

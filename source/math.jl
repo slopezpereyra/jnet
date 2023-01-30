@@ -15,8 +15,8 @@ function σ(X::Vector)
     σ.(X)
 end
 
-function ddx_σ(x::Number)
-    σ(x)(1 - σ(x))
+function dσdx(x::Number)
+    σ(x)*(1 - σ(x))
 end
 
 function logit(x)
@@ -27,11 +27,11 @@ function logit(x)
 end
 
 
-function ddx_σ(X::Vector)
-    broadcast(ddx_σ, X)
+function dσdx(X::Vector)
+    broadcast(dσdx, X)
 end
 
-function ddx_relu(x::Number)
+function dreludx(x::Number)
     ifelse(x > 0, 1, 0)
 end
 
@@ -50,9 +50,11 @@ end
 
 # Hadamard product
 function hadamard(A, B)
-    A = broadcast!(*, A, A, B)
+    C = broadcast(*, A, B)
+    return C
 end
 
+# ERROR: This function returns Matrix{Matrix{Float32}} type, not {Matrix{Float32}}, which is strange.
 function outerproduct(A, B)
     [r * c' for r in eachrow(A), c in eachcol(B)]
 end
